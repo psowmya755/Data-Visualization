@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Author Network — Force Layout (Manual File Picker)</title>
+  <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+  <style>
+    :root{ --maxw:1200px; --bg:#0b1020; --panel:#0e1530; --muted:#94a3b8; }
+    html,body{ height:100%; }
+    body{ margin:0; font-family:system-ui, -apple-system, Segoe UI, Roboto, Inter, Arial, sans-serif; background:var(--bg); color:#e2e8f0; }
+    header{ max-width:var(--maxw); margin:16px auto 0; padding:16px; }
+    header h1{ margin:0 0 4px; font-size:22px; letter-spacing:.3px; }
+    header p{ margin:0; color:var(--muted); font-size:14px; }
+
+    .wrap{ max-width:var(--maxw); margin:12px auto 20px; padding:0 16px 16px; display:grid; grid-template-columns: 300px 1fr; gap:16px; align-items:start; }
+    .card{ background:var(--panel); border:1px solid #1e293b; border-radius:16px; box-shadow:0 10px 30px rgba(0,0,0,.25); }
+    .panel{ padding:14px 14px 12px; }
+    .panel h2{ margin:0 0 8px; font-size:16px; letter-spacing:.2px; }
+    .panel .row{ display:grid; grid-template-columns: 1fr auto; gap:10px; align-items:center; margin:12px 0; }
+    .panel label{ font-size:13px; color:#cbd5e1; }
+    .panel input[type="range"]{ width:100%; }
+    .panel .val{ font-variant-numeric: tabular-nums; font-size:12px; color:#cbd5e1; }
+    .panel .legend{ display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; }
+    .panel .chip{ display:inline-flex; align-items:center; gap:6px; background:#0b122a; border:1px solid #1f2a44; padding:6px 8px; border-radius:999px; font-size:12px; color:#cbd5e1; }
+    .panel .dot{ width:10px; height:10px; border-radius:50%; display:inline-block; }
+    .panel .note{ font-size:12px; color:#94a3b8; margin-top:8px; }
+
+    .filepicker{ display:flex; flex-direction:column; gap:6px; margin-bottom:12px; }
+    .filepicker label{ font-size:12px; color:#cbd5e1; opacity:.9; }
+    .filepicker input[type="file"]{ width:100%; padding:8px; border-radius:10px; background:#0b122a; border:1px solid #1f2a44; color:#e2e8f0; }
+
+    .viz{ position:relative; height: 78vh; min-height:480px; }
+    svg{ width:100%; height:100%; display:block; border-radius:16px; }
+    .link{ stroke:#64748b; stroke-opacity:.25; }
+    .node{ cursor:pointer; }
+    .node circle{ stroke:#0b1020; stroke-width:1.2px; }
+
+    .tooltip{ position:absolute; pointer-events:none; background:#0b122a; border:1px solid #1f2a44; color:#e2e8f0; padding:10px 12px; border-radius:12px; font-size:13px; max-width:320px; box-shadow:0 10px 30px rgba(0,0,0,.35); opacity:0; transform:translate(-50%, -120%); transition:opacity .15s ease; }
+    .tooltip .k{ color:#94a3b8; }
+
+    .footer{ max-width:var(--maxw); margin:0 auto; padding:8px 16px 24px; color:#94a3b8; font-size:12px; }
+    .pill{ background:#0b122a; border:1px solid #1f2a44; padding:2px 8px; border-radius:999px; }
+    a{ color:#93c5fd; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Author Network — D3 Force Layout</h1>
+    <p>Use the file picker to load <code>author_network.json</code> from anywhere on your computer. Hover a node to isolate authors from the <em>same affiliation</em>; click a node for details; tune the forces with the sliders.</p>
+  </header>
+
+  <div class="wrap">
+    <aside class="card panel">
+      <div class="filepicker">
+        <label for="jsonFile">Load network JSON (nodes + links)</label>
+        <input id="jsonFile" type="file" accept=".json,application/json" />
+      </div>
+
+      <h2>Forces</h2>
+      <div class="row">
+        <label for="charge">Charge (forceManyBody)</label>
+        <span class="val" id="chargeVal"></span>
+      </div>
+      <input id="charge" type="range" min="-500" max="-10" step="5" value="-180" />
+
+      <div class="row">
+        <label for="collide">Collide radius ×</label>
+        <span class="val" id="collideVal"></span>
+      </div>
+      <input id="collide" type="range" min="1.0" max="2.8" step="0.1" value="1.6" />
+
+      <div class="row">
+        <label for="linkStr">Link strength</label>
+        <span class="val" id="linkStrVal"></span>
+      </div>
+      <input id="linkStr" type="range" min="0" max="1" step="0.02" value="0.2" />
+
+      <h2 style="margin-top:16px">Hue: Top Countries</h2>
+      <div class="legend" id="legend"></div>
+      <div class="note" id="legendNote"></div>
+    </aside>
+
+    <main class="card viz">
+      <svg id="svg"></svg>
+      <div class="tooltip" id="tooltip"></div>
+    </main>
+  </div>
+
+  <div class="footer">
+    <span class="pill">Size = degree (√ scale 3–12)</span>
+    <span class="pill" style="margin-left:8px;">Grey (#A9A9A9) = countries outside top 10</span>
+  </div>
+
+<script>
+(function(){
+  const tip = d3.select('#tooltip');
+  const svg = d3.select('#svg');
+  const g = svg.append('g');
+
+  // File picker
+  const filePicker = document.getElementById('jsonFile');
+  filePicker.addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    try{
+      const text = await file.text();
+      const data = JSON.parse(text);
+      renderNetwork(data);
+    }catch(err){
+      alert('Could not read JSON: ' + err.message);
+    }
+  });
+
+  function renderNetwork(data){
+    // Clear old scene
+    g.selectAll('*').remove();
+
+    const nodes = (data.nodes||[]).map(d=>({...d}));
+    const links = (data.links||[]).map(d=>({...d}));
+
+    if (!nodes.length){
+      d3.select('#legend').html('');
+      d3.select('#legendNote').text('No nodes found in the JSON.');
+      return;
+    }
+
+    const width = svg.node().clientWidth;
+    const height = svg.node().clientHeight;
+
+    // Size by degree using √ scale
+    const degExtent = d3.extent(nodes, d=>d.degree??0);
+    const r = d3.scaleSqrt()
+      .domain([Math.max(0, degExtent[0]||0), Math.max(1, degExtent[1]||1)])
+      .range([3, 12]);
+
+    // Colors by top-10 countries
+    const countryCounts = d3.rollup(nodes.filter(d=>d.country), v=>v.length, d=>d.country);
+    const topCountries = Array.from(countryCounts.entries())
+      .sort((a,b)=>d3.descending(a[1], b[1]))
+      .slice(0,10)
+      .map(d=>d[0]);
+    const palette = d3.schemeTableau10;
+    const color = (c)=>{
+      const idx = topCountries.indexOf(c);
+      return idx >= 0 ? palette[idx % palette.length] : '#A9A9A9';
+    };
+
+    // Legend
+    const legend = d3.select('#legend').html('');
+    if (topCountries.length){
+      topCountries.forEach((c,i)=>{
+        const chip = legend.append('div').attr('class','chip');
+        chip.append('span').attr('class','dot').style('background', color(c));
+        chip.append('span').text(c);
+      });
+      if (countryCounts.size > topCountries.length){
+        legend.append('div').attr('class','chip').html('<span class="dot" style="background:#A9A9A9"></span><span>Other</span>');
+      }
+      d3.select('#legendNote').text('');
+    } else {
+      d3.select('#legendNote').text('No country data detected — nodes will appear grey.');
+    }
+
+    // Draw links & nodes
+    const link = g.append('g')
+      .attr('stroke','#64748b').attr('stroke-opacity',.22)
+      .selectAll('line')
+      .data(links)
+      .join('line')
+      .attr('class','link');
+
+    const node = g.append('g')
+      .selectAll('.node')
+      .data(nodes)
+      .join('g')
+      .attr('class','node');
+
+    node.append('circle')
+      .attr('r', d=>r(d.degree||0))
+      .attr('fill', d=>color(d.country));
+
+    // Tooltip on click
+    node.on('click', (event, d) => {
+      const html = `
+        <div><span class="k">Author:</span> ${escapeHtml(d.name || '—')}</div>
+        <div><span class="k">Affiliation:</span> ${escapeHtml(d.affiliation || '—')}</div>
+        <div><span class="k">Country:</span> ${escapeHtml(d.country || '—')}</div>
+        <div><span class="k">Degree:</span> ${d.degree ?? 0}</div>
+      `;
+      tip.html(html)
+         .style('left', (event.offsetX + 10) + 'px')
+         .style('top', (event.offsetY - 10) + 'px')
+         .style('opacity', 1);
+    });
+    svg.on('click', (e)=>{ if (e.target.tagName === 'svg') tip.style('opacity',0); });
+
+    // Hover isolate by same affiliation
+    node.on('mouseover', (event, d) => {
+      const aff = d.affiliation || null;
+      const keep = new Set(nodes.filter(x => (x.affiliation || null) === aff).map(x => x.id));
+      node.transition().duration(120).style('opacity', n => keep.has(n.id) ? 1 : 0.2);
+      link.transition().duration(120).style('opacity', l => (keep.has(l.source.id || l.source) && keep.has(l.target.id || l.target)) ? 0.35 : 0.08);
+    }).on('mouseleave', () => {
+      node.transition().duration(150).style('opacity', 1);
+      link.transition().duration(150).style('opacity', 0.22);
+    });
+
+    // Controls & simulation
+    const chargeInput = document.getElementById('charge');
+    const collideInput = document.getElementById('collide');
+    const linkStrInput = document.getElementById('linkStr');
+    const chargeVal = document.getElementById('chargeVal');
+    const collideVal = document.getElementById('collideVal');
+    const linkStrVal = document.getElementById('linkStrVal');
+    chargeVal.textContent = chargeInput.value;
+    collideVal.textContent = '×' + collideInput.value;
+    linkStrVal.textContent = linkStrInput.value;
+
+    let sim = null;
+    function startSim(){
+      if (sim) sim.stop();
+      sim = d3.forceSimulation(nodes)
+        .force('link', d3.forceLink(links).id(d => d.id).strength(+linkStrInput.value))
+        .force('charge', d3.forceManyBody().strength(+chargeInput.value))
+        .force('center', d3.forceCenter(width/2, height/2))
+        .force('collide', d3.forceCollide().radius(d => r(d.degree || 0) * +collideInput.value).iterations(1));
+
+      sim.on('tick', () => {
+        link.attr('x1', d => d.source.x).attr('y1', d => d.source.y)
+            .attr('x2', d => d.target.x).attr('y2', d => d.target.y);
+        node.attr('transform', d => `translate(${d.x},${d.y})`);
+      });
+    }
+
+    chargeInput.addEventListener('input', ()=>{ chargeVal.textContent = chargeInput.value; startSim(); });
+    collideInput.addEventListener('input', ()=>{ collideVal.textContent = '×' + collideInput.value; startSim(); });
+    linkStrInput.addEventListener('input', ()=>{ linkStrVal.textContent = linkStrInput.value; startSim(); });
+
+    // Zoom/pan
+    svg.call(d3.zoom().scaleExtent([.2, 4]).on('zoom', (event)=>{ g.attr('transform', event.transform); }));
+
+    startSim();
+  }
+
+  function escapeHtml(s){ return (s||'').replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c])); }
+})();
+</script>
+</body>
+</html>
